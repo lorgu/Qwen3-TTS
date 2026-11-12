@@ -39,6 +39,13 @@ python prepare_data.py \
   --input_jsonl train_raw.jsonl \
   --output_jsonl train_with_codes.jsonl
 ```
+```bash
+python finetuning/prepare_data.py \
+  --device mps \
+  --tokenizer_model_path Qwen/Qwen3-TTS-Tokenizer-12Hz \
+  --input_jsonl data/train_raw_csc.jsonl \
+  --output_jsonl data/train_raw_csc_tok.jsonl
+```
 
 
 ### 3) Fine-tune
@@ -46,14 +53,25 @@ python prepare_data.py \
 Run SFT using the prepared JSONL:
 
 ```bash
-python sft_12hz.py \
+python finetuning/sft_12hz.py \
   --init_model_path Qwen/Qwen3-TTS-12Hz-1.7B-Base \
-  --output_model_path output \
-  --train_jsonl train_with_codes.jsonl \
+  --output_model_path finetuning/output \
+  --train_jsonl data/train_raw_csc_tok.jsonl \
   --batch_size 32 \
   --lr 2e-6 \
   --num_epochs 10 \
-  --speaker_name speaker_test
+  --speaker_name csc
+```
+```bash
+python finetuning/sft_12hz.py \
+  --init_model_path Qwen/Qwen3-TTS-12Hz-0.6B-Base \
+  --output_model_path finetuning/output \
+  --train_jsonl data/train_raw_csc_tok.jsonl \
+  --batch_size 8 \
+  --lr 2e-6 \
+  --num_epochs 10 \
+  --speaker_name csc \
+  --device mps
 ```
 
 Checkpoints will be written to:

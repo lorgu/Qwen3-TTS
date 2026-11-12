@@ -26,6 +26,7 @@ from safetensors.torch import save_file
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import AutoConfig
+from huggingface_hub import snapshot_download
 
 target_speaker_embedding = None
 def train():
@@ -39,17 +40,29 @@ def train():
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--speaker_name", type=str, default="speaker_test")
+    parser.add_argument("--device", type=str, default="cuda:0")
     args = parser.parse_args()
 
     accelerator = Accelerator(gradient_accumulation_steps=4, mixed_precision="bf16", log_with="tensorboard")
 
     MODEL_PATH = args.init_model_path
+    DEVICE = args.device
+    INIT_MODEL_PATH = args.init_model_path
 
-    qwen3tts = Qwen3TTSModel.from_pretrained(
-        MODEL_PATH,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
-    )
+    if DEVICE == "mps":
+        qwen3tts = Qwen3TTSModel.from_pretrained(
+            MODEL_PATH,
+            torch_dtype=torch.bfloat16,
+            # attn_implementation="flash_attention_2",
+            attn_implementation="sdpa",    # Use SDPA instead of FlashAttention2
+            device_map="mps",              # Force use of Apple GPU
+        )
+    else:
+        qwen3tts = Qwen3TTSModel.from_pretrained(
+            MODEL_PATH,
+            torch_dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
+        )
     config = AutoConfig.from_pretrained(MODEL_PATH)
 
     train_data = open(args.train_jsonl).readlines()
@@ -86,7 +99,15 @@ def train():
                 input_text_ids = input_ids[:, :, 0]
                 input_codec_ids = input_ids[:, :, 1]
 
-                input_text_embedding = model.talker.model.text_embedding(input_text_ids) * text_embedding_mask
+                # print("INIT_MODEL_PATH: ", INIT_MODEL_PATH)
+                if INIT_MODEL_PATH == "Qwen/Qwen3-TTS-12Hz-0.6B-Base":
+                    # print("Using text projection")
+                    input_text_embedding = model.talker.text_projection(
+                        model.talker.model.text_embedding(input_text_ids)
+                    ) * text_embedding_mask
+                else:
+                    input_text_embedding = model.talker.model.text_embedding(input_text_ids) * text_embedding_mask
+                    
                 input_codec_embedding = model.talker.model.codec_embedding(input_codec_ids) * codec_embedding_mask
                 input_codec_embedding[:, 6, :] = speaker_embedding
 
@@ -124,24 +145,30 @@ def train():
                 accelerator.print(f"Epoch {epoch} | Step {step} | Loss: {loss.item():.4f}")
 
         if accelerator.is_main_process:
-            output_dir = os.path.join(args.output_model_path, f"checkpoint-epoch-{epoch}")
-            shutil.copytree(MODEL_PATH, output_dir, dirs_exist_ok=True)
+            local_model_path = snapshot_download(
+                repo_id=MODEL_PATH
+            )
 
-            input_config_file = os.path.join(MODEL_PATH, "config.json")
+            output_dir = os.path.join(
+                args.output_model_path,
+                f"checkpoint-epoch-{epoch}"
+            )
+            shutil.copytree(local_model_path, output_dir, dirs_exist_ok=True)
+
+            input_config_file = os.path.join(local_model_path, "config.json")
             output_config_file = os.path.join(output_dir, "config.json")
-            with open(input_config_file, 'r', encoding='utf-8') as f:
+
+            with open(input_config_file, "r", encoding="utf-8") as f:
                 config_dict = json.load(f)
+
             config_dict["tts_model_type"] = "custom_voice"
+
             talker_config = config_dict.get("talker_config", {})
-            talker_config["spk_id"] = {
-                args.speaker_name: 3000
-            }
-            talker_config["spk_is_dialect"] = {
-                args.speaker_name: False
-            }
+            talker_config["spk_id"] = {args.speaker_name: 3000}
+            talker_config["spk_is_dialect"] = {args.speaker_name: False}
             config_dict["talker_config"] = talker_config
 
-            with open(output_config_file, 'w', encoding='utf-8') as f:
+            with open(output_config_file, "w", encoding="utf-8") as f:
                 json.dump(config_dict, f, indent=2, ensure_ascii=False)
 
             unwrapped_model = accelerator.unwrap_model(model)
